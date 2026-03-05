@@ -1,0 +1,51 @@
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+  # Copy trace_id and span_id into log attributes so Loki can expose them for trace-to-logs correlation
+  transform/logs:
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["trace_id"], trace_id) where trace_id != nil
+          - set(attributes["span_id"], span_id) where span_id != nil
+
+exporters:
+  # Traces -> Jaeger via OTLP gRPC
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics -> Prometheus scrape endpoint
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+  # Logs -> Loki (trace_id/span_id in attributes for Grafana trace-to-logs)
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+      job: true
+      instance: false
+      level: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [transform/logs, batch]
+      exporters: [loki]

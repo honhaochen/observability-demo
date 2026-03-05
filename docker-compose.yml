@@ -1,0 +1,101 @@
+services:
+  # ---------- Traces backend ----------
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC ingest
+      - "4318:4318"     # OTLP HTTP ingest
+
+  # ---------- Logs backend ----------
+  loki:
+    image: grafana/loki:2.9.8
+    ports:
+      - "3100:3100"
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/config.yml:ro
+
+  # ---------- OTel Collector (gateway) ----------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.95.0
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./otel/otel-collector-config.yml:/etc/otelcol/config.yml:ro
+    ports:
+      - "4319:4318"   # OTLP HTTP from host (mapped); inside collector listens 4318
+      - "8889:8889"   # Prometheus exporter endpoint (scraped by Prometheus)
+    depends_on:
+      - jaeger
+      - loki
+
+  # ---------- Metrics backend ----------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - otel-collector
+
+  # ---------- Single UI ----------
+  grafana:
+    image: grafana/grafana:10.4.6
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+
+  # ---------- MySQL ----------
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: obs_demo
+      MYSQL_USER: app
+      MYSQL_PASSWORD: app
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------- Demo services ----------
+  api:
+    build: ./api
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - MYSQL_DSN=app:app@tcp(mysql:3306)/obs_demo?parseTime=true
+      - WORK_DELAY_MS=550
+      - QUERY_DELAY_MS=500
+    ports:
+      - "8081:8081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  gateway:
+    build: ./gateway
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - API_URL=http://api:8081
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
